@@ -14,44 +14,62 @@ var data_user, data_priv,
 	rmultiDash = /([A-Z])/g;
 
 function Data() {
-	// Data objects. Keys correspond to the
-	// unlocker that is accessible via "locker" method
-	this.cache = {};
+	// Support: Android < 4,
+	// Old WebKit does not have Object.preventExtensions/freeze method,
+	// return new empty object instead with no [[set]] accessor
+	Object.defineProperty( this.cache = {}, 0, {
+		get: function() {
+			return {};
+		}
+	});
+
+	this.expando = jQuery.expando + Math.random();
 }
 
 Data.uid = 1;
 
+Data.accepts = function( owner ) {
+	// Accepts only:
+	//  - Node
+	//    - Node.ELEMENT_NODE
+	//    - Node.DOCUMENT_NODE
+	//  - Object
+	//    - Any
+	return owner.nodeType ?
+		owner.nodeType === 1 || owner.nodeType === 9 : true;
+};
+
 Data.prototype = {
-	locker: function( owner ) {
-		var ovalueOf,
-		// Check if the owner object has already been outfitted with a valueOf
-		// "locker". They "key" is the "Data" constructor itself, which is scoped
-		// to the IIFE that wraps jQuery. This prevents outside tampering with the
-		// "valueOf" locker.
-		unlock = owner.valueOf( Data );
-
-		// If no "unlock" string exists, then create a valueOf "locker"
-		// for storing the unlocker key. Since valueOf normally does not accept any
-		// arguments, extant calls to valueOf will still behave as expected.
-		if ( typeof unlock !== "string" ) {
-			unlock = jQuery.expando + Data.uid++;
-			ovalueOf = owner.valueOf;
-
-			Object.defineProperty( owner, "valueOf", {
-				value: function( pick ) {
-					if ( pick === Data ) {
-						return unlock;
-					}
-					return ovalueOf.apply( owner );
-				}
-				// By omitting explicit [ enumerable, writable, configurable ]
-				// they will default to "false"
-			});
+	key: function( owner ) {
+		// We can accept data for non-element nodes in modern browsers,
+		// but we should not, see #8335.
+		// Always return the key for a frozen object.
+		if ( !Data.accepts( owner ) ) {
+			return 0;
 		}
 
-		// If private or user data already create a valueOf locker
-		// then we'll reuse the unlock key, but still need to create
-		// a cache object for this instance (could be private or user)
+		var descriptor = {},
+			// Check if the owner object already has a cache key
+			unlock = owner[ this.expando ];
+
+		// If not, create one
+		if ( !unlock ) {
+			unlock = Data.uid++;
+
+			// Secure it in a non-enumerable, non-writable property
+			try {
+				descriptor[ this.expando ] = { value: unlock };
+				Object.defineProperties( owner, descriptor );
+
+			// Support: Android < 4
+			// Fallback to a less secure definition
+			} catch ( e ) {
+				descriptor[ this.expando ] = unlock;
+				jQuery.extend( owner, descriptor );
+			}
+		}
+
+		// Ensure the cache object
 		if ( !this.cache[ unlock ] ) {
 			this.cache[ unlock ] = {};
 		}
@@ -59,13 +77,12 @@ Data.prototype = {
 		return unlock;
 	},
 	set: function( owner, data, value ) {
-		var prop, cache, unlock;
-
-		// There may be an unlock assigned to this node,
-		// if there is no entry for this "owner", create one inline
-		// and set the unlock as though an owner entry had always existed
-		unlock = this.locker( owner );
-		cache = this.cache[ unlock ];
+		var prop,
+			// There may be an unlock assigned to this node,
+			// if there is no entry for this "owner", create one inline
+			// and set the unlock as though an owner entry had always existed
+			unlock = this.key( owner ),
+			cache = this.cache[ unlock ];
 
 		// Handle: [ owner, key, value ] args
 		if ( typeof data === "string" ) {
@@ -73,14 +90,9 @@ Data.prototype = {
 
 		// Handle: [ owner, { properties } ] args
 		} else {
-			// [*] In the case where there was actually no "owner" entry and
-			// this.locker( owner ) was called to create one, there will be
-			// a corresponding empty plain object in the cache.
-			//
-			// Note, this will kill the reference between
-			// "this.cache[ unlock ]" and "cache"
+			// Fresh assignments by object are shallow copied
 			if ( jQuery.isEmptyObject( cache ) ) {
-				cache = data;
+				jQuery.extend( this.cache[ unlock ], data );
 			// Otherwise, copy the properties one-by-one to the cache object
 			} else {
 				for ( prop in data ) {
@@ -88,21 +100,14 @@ Data.prototype = {
 				}
 			}
 		}
-
-		// [*] This is required to support an expectation made possible by the old
-		// data system where plain objects used to initialize would be
-		// set to the cache by reference, instead of having properties and
-		// values copied.
-		this.cache[ unlock ] = cache;
-
-		return this;
+		return cache;
 	},
 	get: function( owner, key ) {
 		// Either a valid cache is found, or will be created.
 		// New caches will be created and the unlock returned,
 		// allowing direct access to the newly created
-		// empty data object.
-		var cache = this.cache[ this.locker( owner ) ];
+		// empty data object. A valid owner object must be provided.
+		var cache = this.cache[ this.key( owner ) ];
 
 		return key === undefined ?
 			cache : cache[ key ];
@@ -137,63 +142,54 @@ Data.prototype = {
 		return value !== undefined ? value : key;
 	},
 	remove: function( owner, key ) {
-		var i, l, name,
-				unlock = this.locker( owner ),
-				cache = this.cache[ unlock ];
+		var i, name, camel,
+			unlock = this.key( owner ),
+			cache = this.cache[ unlock ];
 
 		if ( key === undefined ) {
-			cache = {};
-		} else {
-			if ( cache ) {
-				// Support array or space separated string of keys
-				if ( !Array.isArray( key ) ) {
-					// Try the string as a key before any manipulation
-					if ( key in cache ) {
-						name = [ key ];
-					} else {
-						// If a key with the spaces exists, use it.
-						// Otherwise, create an array by matching non-whitespace
-						name = jQuery.camelCase( key );
-						name = name in cache ?
-							[ name ] : ( name.match( core_rnotwhite ) || [] );
-					}
-				} else {
-					// If "name" is an array of keys...
-					// When data is initially created, via ("key", "val") signature,
-					// keys will be converted to camelCase.
-					// Since there is no way to tell _how_ a key was added, remove
-					// both plain key and camelCase key. #12786
-					// This will only penalize the array argument path.
-					name = key.concat( key.map( jQuery.camelCase ) );
-				}
-				i = 0;
-				l = name.length;
+			this.cache[ unlock ] = {};
 
-				for ( ; i < l; i++ ) {
-					delete cache[ name[i] ];
+		} else {
+			// Support array or space separated string of keys
+			if ( jQuery.isArray( key ) ) {
+				// If "name" is an array of keys...
+				// When data is initially created, via ("key", "val") signature,
+				// keys will be converted to camelCase.
+				// Since there is no way to tell _how_ a key was added, remove
+				// both plain key and camelCase key. #12786
+				// This will only penalize the array argument path.
+				name = key.concat( key.map( jQuery.camelCase ) );
+			} else {
+				camel = jQuery.camelCase( key );
+				// Try the string as a key before any manipulation
+				if ( key in cache ) {
+					name = [ key, camel ];
+				} else {
+					// If a key with the spaces exists, use it.
+					// Otherwise, create an array by matching non-whitespace
+					name = camel;
+					name = name in cache ?
+						[ name ] : ( name.match( core_rnotwhite ) || [] );
 				}
 			}
+
+			i = name.length;
+			while ( i-- ) {
+				delete cache[ name[ i ] ];
+			}
 		}
-		this.cache[ unlock ] = cache;
 	},
 	hasData: function( owner ) {
 		return !jQuery.isEmptyObject(
-			this.cache[ this.locker( owner ) ]
+			this.cache[ owner[ this.expando ] ] || {}
 		);
 	},
 	discard: function( owner ) {
-		delete this.cache[ this.locker( owner ) ];
+		if ( owner[ this.expando ] ) {
+			delete this.cache[ owner[ this.expando ] ];
+		}
 	}
 };
-
-// This will be used by remove()/cleanData() in manipulation to sever
-// remaining references to node objects. One day we'll replace the dual
-// arrays with a WeakMap and this won't be an issue.
-// (Splices the data objects out of the internal cache arrays)
-function data_discard( owner ) {
-	data_user.discard( owner );
-	data_priv.discard( owner );
-}
 
 // These may be used throughout the jQuery core codebase
 data_user = new Data();
@@ -201,15 +197,7 @@ data_priv = new Data();
 
 
 jQuery.extend({
-	// Unique for each copy of jQuery on the page
-	// Non-digits removed to match rinlinejQuery
-	expando: "jQuery" + ( core_version + Math.random() ).replace( /\D/g, "" ),
-
-	// This is no longer relevant to jQuery core, but must remain
-	// supported for the sake of jQuery 1.9.x API surface compatibility.
-	acceptData: function() {
-		return true;
-	},
+	acceptData: Data.accepts,
 
 	hasData: function( elem ) {
 		return data_user.hasData( elem ) || data_priv.hasData( elem );
@@ -220,29 +208,24 @@ jQuery.extend({
 	},
 
 	removeData: function( elem, name ) {
-		return data_user.remove( elem, name );
+		data_user.remove( elem, name );
 	},
 
-	// TODO: Replace all calls to _data and _removeData with direct
-	// calls to
-	//
-	// data_priv.access( elem, name, data );
-	//
-	// data_priv.remove( elem, name );
-	//
+	// TODO: Now that all calls to _data and _removeData have been replaced
+	// with direct calls to data_priv methods, these can be deprecated.
 	_data: function( elem, name, data ) {
 		return data_priv.access( elem, name, data );
 	},
 
 	_removeData: function( elem, name ) {
-		return data_priv.remove( elem, name );
+		data_priv.remove( elem, name );
 	}
 });
 
 jQuery.fn.extend({
 	data: function( key, value ) {
 		var attrs, name,
-			elem = this[0],
+			elem = this[ 0 ],
 			i = 0,
 			data = null;
 
@@ -254,10 +237,10 @@ jQuery.fn.extend({
 				if ( elem.nodeType === 1 && !data_priv.get( elem, "hasDataAttrs" ) ) {
 					attrs = elem.attributes;
 					for ( ; i < attrs.length; i++ ) {
-						name = attrs[i].name;
+						name = attrs[ i ].name;
 
 						if ( name.indexOf( "data-" ) === 0 ) {
-							name = jQuery.camelCase( name.substring(5) );
+							name = jQuery.camelCase( name.slice(5) );
 							dataAttr( elem, name, data[ name ] );
 						}
 					}
@@ -277,34 +260,37 @@ jQuery.fn.extend({
 
 		return jQuery.access( this, function( value ) {
 			var data,
-					camelKey = jQuery.camelCase( key );
+				camelKey = jQuery.camelCase( key );
 
-			// Get the Data...
-			if ( value === undefined ) {
-
+			// The calling jQuery object (element matches) is not empty
+			// (and therefore has an element appears at this[ 0 ]) and the
+			// `value` parameter was not undefined. An empty jQuery object
+			// will result in `undefined` for elem = this[ 0 ] which will
+			// throw an exception if an attempt to read a data cache is made.
+			if ( elem && value === undefined ) {
 				// Attempt to get data from the cache
 				// with the key as-is
 				data = data_user.get( elem, key );
 				if ( data !== undefined ) {
 					return data;
 				}
-				// Attempt to "discover" the data in
-				// HTML5 custom data-* attrs
-				data = dataAttr( elem, key, undefined );
-				if ( data !== undefined ) {
-					return data;
-				}
 
-				// As a last resort, attempt to find
-				// the data by checking AGAIN, but with
-				// a camelCased key.
+				// Attempt to get data from the cache
+				// with the key camelized
 				data = data_user.get( elem, camelKey );
 				if ( data !== undefined ) {
 					return data;
 				}
 
+				// Attempt to "discover" the data in
+				// HTML5 custom data-* attrs
+				data = dataAttr( elem, camelKey, undefined );
+				if ( data !== undefined ) {
+					return data;
+				}
+
 				// We tried really hard, but the data doesn't exist.
-				return undefined;
+				return;
 			}
 
 			// Set the data...
@@ -318,10 +304,10 @@ jQuery.fn.extend({
 				// This might not apply to all properties...*
 				data_user.set( this, camelKey, value );
 
-				// *... In the case of properties that might ACTUALLY
+				// *... In the case of properties that might _actually_
 				// have dashes, we need to also store a copy of that
 				// unchanged property.
-				if ( /-/.test( key ) && data !== undefined ) {
+				if ( key.indexOf("-") !== -1 && data !== undefined ) {
 					data_user.set( this, key, value );
 				}
 			});
@@ -341,19 +327,18 @@ function dataAttr( elem, key, data ) {
 	// If nothing was found internally, try to fetch any
 	// data from the HTML5 data-* attribute
 	if ( data === undefined && elem.nodeType === 1 ) {
-
 		name = "data-" + key.replace( rmultiDash, "-$1" ).toLowerCase();
 		data = elem.getAttribute( name );
 
 		if ( typeof data === "string" ) {
 			try {
 				data = data === "true" ? true :
-				data === "false" ? false :
-				data === "null" ? null :
-				// Only convert to a number if it doesn't change the string
-				+data + "" === data ? +data :
-				rbrace.test( data ) ?
-					JSON.parse( data ) : data;
+					data === "false" ? false :
+					data === "null" ? null :
+					// Only convert to a number if it doesn't change the string
+					+data + "" === data ? +data :
+					rbrace.test( data ) ? JSON.parse( data ) :
+					data;
 			} catch( e ) {}
 
 			// Make sure we set the data so it isn't changed later
